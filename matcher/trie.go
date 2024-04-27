@@ -93,74 +93,62 @@ func (t *trieMatcher) Remove(sub *Operation) error {
 	return nil
 }
 
+// Lookup is a method that finds all subscribers that match a given routing key in the trie.
+// It first splits the routing key into parts, then locks the trie to ensure thread safety, and finally calls the lookup function to find the subscribers.
+// It returns a slice of Handlers, which are the subscribers that match the routing key.
 func (t *trieMatcher) Lookup(topic string) []Handler {
 	t.Lock()
-	var (
-		subMap = t.lookup(strings.Split(topic, t.option.Delimiter), t.root)
-		subs   = make([]Handler, len(subMap))
-		i      = 0
-	)
+	subs := make(map[Handler]struct{})
+	t.lookup(strings.Split(topic, t.option.Delimiter), t.root, subs)
 	t.Unlock()
-	for sub := range subMap {
-		subs[i] = sub
+
+	handlers := make([]Handler, len(subs))
+	i := 0
+	for sub := range subs {
+		handlers[i] = sub
 		i++
 	}
-	return subs
+	return handlers
 }
 
-func (t *trieMatcher) lookup(words []string, node *node) map[Handler]struct{} {
+// lookup is a recursive function that searches for all subscribers in the trie that match a given routing key.
+// It takes three parameters: words are the parts of the routing key after splitting, node is the current node, and subs is the map to store subscribers.
+func (t *trieMatcher) lookup(words []string, node *node, subs map[Handler]struct{}) {
+	// If words is empty, it means all parts have been processed, so we add the subscribers of the current node to subs.
 	if len(words) == 0 {
-		hlds := node.subs
-
-		// match("#.b.#", "a.b") == true
-		if child, ok := node.children[t.option.WildcardSome]; ok {
-			// if the child has only a child itself
-			if len(child.children) == 1 {
-				for k, v := range child.subs {
-					hlds[k] = v
-				}
-			}
-		}
-		return hlds
-	}
-
-	subs := make(map[Handler]struct{})
-
-	if n, ok := node.children[words[0]]; ok {
-		for k, v := range t.lookup(words[1:], n) {
+		for k, v := range node.subs {
 			subs[k] = v
 		}
+		// If there is a child node that matches the wildcard "#", we also add its subscribers to subs.
+		if child, ok := node.children[t.option.WildcardSome]; ok && len(child.children) == 1 {
+			for k, v := range child.subs {
+				subs[k] = v
+			}
+		}
+		return
 	}
+
+	// If there is a child node that matches the first part of words, we recursively look up the remaining parts.
+	if n, ok := node.children[words[0]]; ok {
+		t.lookup(words[1:], n, subs)
+	}
+	// If the first part is not an empty string and there is a child node that matches the wildcard "*", we also recursively look up the remaining parts.
 	if words[0] != empty {
 		if n, ok := node.children[t.option.WildcardOne]; ok {
-			for k, v := range t.lookup(words[1:], n) {
-				subs[k] = v
-			}
+			t.lookup(words[1:], n, subs)
 		}
 	}
 
+	// If there is a child node that matches the wildcard "#", we recursively look up the remaining parts for all possible matches.
 	if n, ok := node.children[t.option.WildcardSome]; ok {
-		// check the child of child with words[0]
-		// if yes, looking to use grandchild, wcSome count = 0
-		// match("a.#.b", "a.b") == true
 		if nn, ok := n.children[words[0]]; ok {
-			for k, v := range t.lookup(words[1:], nn) {
-				subs[k] = v
-			}
+			t.lookup(words[1:], nn, subs)
 		}
-		// match("a.#.*", "a.b") == true
 		if words[0] != empty {
 			if nn, ok := n.children[t.option.WildcardOne]; ok {
-				for k, v := range t.lookup(words[1:], nn) {
-					subs[k] = v
-				}
+				t.lookup(words[1:], nn, subs)
 			}
 		}
-
-		// always use child
-		for k, v := range t.lookup(words[1:], n) {
-			subs[k] = v
-		}
+		t.lookup(words[1:], n, subs)
 	}
-	return subs
 }
